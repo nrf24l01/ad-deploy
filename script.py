@@ -36,11 +36,8 @@ ISO_DIR = os.environ.get("ISO_DIR", "/var/lib/vz/template/iso")
 
 # ===================== Lab config =====================
 N_TEAMS = int(os.environ.get("N_TEAMS", "5"))
-BR_CTF = os.environ.get("BR_CTF", "vmbr10")  # Single bridge for all CTF traffic (10.0.0.0/8)
-ORG_HOST_IP = os.environ.get("ORG_HOST_IP", "10.10.10.254/8")
-ORG_HOST_ADDR = ORG_HOST_IP.split("/")[0]
+BR_CTF = os.environ.get("BR_CTF", "vmbr10")  # Bridge for CTF VM interconnect (/31 point-to-point)
 DNS_SERVERS = [s.strip() for s in os.environ.get("DNS_SERVERS", "1.1.1.1,8.8.8.8").split(",") if s.strip()]
-CTF_NET_CIDR = os.environ.get("CTF_NET_CIDR", "10.0.0.0/8")  # Combined CTF network
 
 # External network on net1 (VLAN)
 EXT_BRIDGE = os.environ.get("EXT_BRIDGE", "vmbr1")  # External bridge name
@@ -50,7 +47,7 @@ EXT_GW_GATEWAY = os.environ.get("EXT_GW_GATEWAY", "")  # External gateway (e.g. 
 
 VMID_GW = int(os.environ.get("VMID_GW", "100"))
 VMID_FORCAD = int(os.environ.get("VMID_FORCAD", "110"))
-VMID_TEAM_BASE = int(os.environ.get("VMID_TEAM_BASE", "200"))
+VMID_TEAM_BASE = int(os.environ.get("VMID_TEAM_BASE", "720"))
 
 # Root passwords for participants (team VMs)
 ALLOW_ROOT_SSH = os.environ.get("ALLOW_ROOT_SSH", "1") == "1"
@@ -65,11 +62,17 @@ FORCAD_RAM_MB = int(os.environ.get("FORCAD_RAM_MB", "4096"))
 GW_CORES = int(os.environ.get("GW_CORES", "2"))
 GW_RAM_MB = int(os.environ.get("GW_RAM_MB", "1024"))
 
-# IP plan (all on 10.0.0.0/8 network)
-GW_CTF_IP = os.environ.get("GW_CTF_IP", "10.10.10.1/8")  # Gateway internal CTF IP
-GW_CTF_ADDR = GW_CTF_IP.split("/")[0]
-FORCAD_IP = os.environ.get("FORCAD_IP", "10.10.10.10/8")
-FORCAD_GW = os.environ.get("FORCAD_GW", GW_CTF_ADDR)
+# IP plan — isolated /31 point-to-point links
+# ForcAD link: 10.10.10.10/31 (ForcAD) <-> 10.10.10.11/31 (GW)
+# Team N link: 10.58.57.(2N-1)/31 (VM) <-> 10.58.57.(2N-2)/31 (GW)
+# WireGuard:   10.10.10.1 (GW wg0),  players 10.57.<team>.{3..13}/24
+FORCAD_IP = os.environ.get("FORCAD_IP", "10.10.10.10/31")
+FORCAD_GW_SIDE = os.environ.get("FORCAD_GW_SIDE", "10.10.10.11/31")  # GW side of ForcAD /31
+FORCAD_GW = FORCAD_GW_SIDE.split("/")[0]  # 10.10.10.11
+WG_GW_IP = os.environ.get("WG_GW_IP", "10.10.10.1")  # GW address on wg0
+
+# Legacy compat alias
+GW_CTF_ADDR = FORCAD_GW  # GW address that ForcAD uses as gateway
 
 # WireGuard + FRP (only WG UDP port forward)
 WG_PORT = int(os.environ.get("WG_PORT", "51820"))
@@ -248,10 +251,40 @@ def generate_mac_address(vmid: int, interface: int = 0) -> str:
         return ":".join(mac_parts)
 
 
+# ---------- /31 point-to-point helpers ----------
+
+def team_vm_ip(team: int) -> str:
+    """Team N VM address: 10.58.57.(2N-1)/31"""
+    return f"10.58.57.{2 * team - 1}/31"
+
+
+def team_gw_ip(team: int) -> str:
+    """GW-side address for team N link: 10.58.57.(2N-2)/31"""
+    return f"10.58.57.{2 * team - 2}/31"
+
+
+def team_vm_addr(team: int) -> str:
+    """Plain IP without mask for team VM."""
+    return f"10.58.57.{2 * team - 1}"
+
+
+def team_gw_addr(team: int) -> str:
+    """Plain IP without mask for GW side of team link."""
+    return f"10.58.57.{2 * team - 2}"
+
+
 # ---------------- cloud-init content builders ----------------
 
-def gw_network_config() -> str:
+def gw_network_config(n_teams: int) -> str:
+    """Netplan network-config for GW: multiple /31 addresses on ens18."""
     dns_block = ", ".join(DNS_SERVERS) if DNS_SERVERS else "1.1.1.1"
+
+    # Build list of all /31 addresses on ens18
+    ens18_addrs = [FORCAD_GW_SIDE]  # 10.10.10.11/31  (ForcAD link)
+    for t in range(1, n_teams + 1):
+        ens18_addrs.append(team_gw_ip(t))  # 10.58.57.(2t-2)/31
+
+    addrs_yaml = ", ".join(ens18_addrs)
 
     if EXT_GW_IP and EXT_GW_GATEWAY:
         ens19_block = f"""
@@ -270,7 +303,7 @@ def gw_network_config() -> str:
     return f"""version: 2
 ethernets:
   ens18:
-    addresses: [{GW_CTF_IP}]
+    addresses: [{addrs_yaml}]
     nameservers:
       addresses: [{dns_block}]{ens19_block}
 """.rstrip()
@@ -279,22 +312,26 @@ ethernets:
 def gw_user_data(n_teams: int, root_pw: str) -> str:
     """
     Cloud-init user-data for the Gateway VM.
-    
-    Network layout:
-    - eth0: CTF internal network (10.0.0.0/8) - all VMs on same flat network
-    - eth1: External network (optional, for internet access via EXT_BRIDGE)
+
+    Network layout (isolated /31 point-to-point links):
+    - ens18: multiple /31 subnets — one per team VM + one for ForcAD
+    - ens19: optional external network for internet access
+    - wg0:   WireGuard — players connect here, 10.57.<team>.{3..13}/24
+
+    Routing:
+    - Each team VM (10.58.57.(2N-1)/31) is isolated; GW is the only peer
+    - ForcAD (10.10.10.10/31) — GW side 10.10.10.11/31
+    - WG players (10.57.<team>.0/24) reach their team VM + ForcAD through GW
+    - All inter-VM traffic passes through GW (forwarding + nftables)
     """
     dns_block = ", ".join(DNS_SERVERS) if DNS_SERVERS else "1.1.1.1"
     dns_lines = "\n".join(f"      nameserver {dns}" for dns in DNS_SERVERS) or "      nameserver 1.1.1.1"
     resolvectl_dns = " ".join(DNS_SERVERS) if DNS_SERVERS else "1.1.1.1"
-    
-    # Build eth1 (external) config if provided
-    eth1_config = ""
-    ext_route_cmd = ""
+
     if EXT_GW_IP and EXT_GW_GATEWAY:
         ext_route_cmd = f"  - ip route replace default via {EXT_GW_GATEWAY} dev ens19"
     else:
-        ext_route_cmd = f"  - ip route replace default via {ORG_HOST_ADDR} dev ens18"
+        ext_route_cmd = "  # no external gateway configured"
 
     frp_files = ""
     frp_runcmd = ""
@@ -338,6 +375,55 @@ def gw_user_data(n_teams: int, root_pw: str) -> str:
   - systemctl daemon-reload
   - systemctl enable --now frpc
 """
+
+    # ---- Build nftables rules ----
+    # Allow forwarding between all /31 links and WG subnets via GW
+    # Each team's WG subnet 10.57.<team>.0/24 can reach:
+    #   - their team VM 10.58.57.(2N-1)
+    #   - ForcAD 10.10.10.10
+    #   - other teams' VMs (attack/defense CTF)
+    # Team VMs can reach each other and ForcAD through GW
+    nft_rules = r"""flush ruleset
+      table inet filter {
+        chain input {
+          type filter hook input priority 0;
+          policy accept;
+        }
+        chain forward {
+          type filter hook forward priority 0;
+          policy drop;
+
+          # Established / related
+          ct state established,related accept
+
+          # ForcAD -> any team VM (checker traffic)
+          ip saddr 10.10.10.10 ip daddr 10.58.57.0/24 accept
+
+          # Team VMs -> ForcAD (service traffic)
+          ip saddr 10.58.57.0/24 ip daddr 10.10.10.10 accept
+
+          # Team VMs -> other team VMs (attack traffic through GW)
+          ip saddr 10.58.57.0/24 ip daddr 10.58.57.0/24 accept
+
+          # WG players -> team VMs (all teams, A/D CTF)
+          ip saddr 10.57.0.0/16 ip daddr 10.58.57.0/24 accept
+
+          # WG players -> ForcAD scoreboard
+          ip saddr 10.57.0.0/16 ip daddr 10.10.10.10 accept
+
+          # Team VMs -> internet (through GW)
+          ip saddr 10.58.57.0/24 oifname "ens19" accept
+
+          # ForcAD -> internet
+          ip saddr 10.10.10.10 oifname "ens19" accept
+        }
+      }
+      table inet nat {
+        chain postrouting {
+          type nat hook postrouting priority srcnat;
+          oifname "ens19" masquerade
+        }
+      }"""
 
     return f"""#cloud-config
 hostname: ctf-gw
@@ -414,28 +500,7 @@ write_files:
   - path: /etc/nftables.conf
     permissions: "0644"
     content: |
-      flush ruleset
-      table inet filter {{
-        chain forward {{
-          type filter hook forward priority 0;
-          policy drop;
-
-          ct state established,related accept
-
-          # All CTF traffic on 10.0.0.0/8 allowed to each other
-          ip saddr 10.0.0.0/8 ip daddr 10.0.0.0/8 accept
-
-          # Outbound to internet from CTF network
-          ip saddr 10.0.0.0/8 ip daddr != 10.0.0.0/8 accept
-        }}
-      }}
-      table inet nat {{
-        chain postrouting {{
-          type nat hook postrouting priority srcnat;
-          # NAT for external interface (if configured)
-          oifname "ens19" ip saddr 10.0.0.0/8 masquerade
-        }}
-      }}
+{indent_block(nft_rules, 6)}
 
 {frp_files}
 
@@ -460,10 +525,16 @@ write_files:
       SERVER_PRIV="$(cat server.key)"
       SERVER_PUB="$(cat server.pub)"
 
+      # Allowed IPs that clients can reach through the tunnel
+      # 10.58.57.0/24  - team VMs
+      # 10.10.10.0/24  - ForcAD + infra
+      # 10.57.0.0/16   - other WG players (if needed)
+      CLIENT_ALLOWED="10.58.57.0/24, 10.10.10.0/24, 10.57.0.0/16"
+
       # Write server config
       cat > wg0.conf <<EOF
       [Interface]
-      Address = 10.10.10.1/8
+      Address = {WG_GW_IP}/16
       ListenPort = {WG_PORT}
       PrivateKey = $SERVER_PRIV
       EOF
@@ -490,12 +561,12 @@ write_files:
       [Peer]
       PublicKey = $SERVER_PUB
       Endpoint = {WG_ENDPOINT}
-      AllowedIPs = 10.0.0.0/8
+      AllowedIPs = $CLIENT_ALLOWED
       PersistentKeepalive = 25
       EOF
       done
 
-      # Team configs: 11 per team (10.60.<team>.3-13)
+      # Team configs: 11 per team  (10.57.<team>.3 .. 10.57.<team>.13)
       for TEAM in $(seq 1 {n_teams}); do
         for IP_LAST in $(seq 3 13); do
           NAME="team${{TEAM}}-player${{IP_LAST}}"
@@ -507,18 +578,18 @@ write_files:
 
       [Peer]
       PublicKey = $PEER_PUB
-      AllowedIPs = 10.60.$TEAM.$IP_LAST/32
+      AllowedIPs = 10.57.$TEAM.$IP_LAST/32
       EOF
 
           cat > "/srv/wg-configs/$NAME.conf" <<EOF
       [Interface]
-      Address = 10.60.$TEAM.$IP_LAST/32
+      Address = 10.57.$TEAM.$IP_LAST/32
       PrivateKey = $PEER_PRIV
 
       [Peer]
       PublicKey = $SERVER_PUB
       Endpoint = {WG_ENDPOINT}
-      AllowedIPs = 10.0.0.0/8
+      AllowedIPs = $CLIENT_ALLOWED
       PersistentKeepalive = 25
       EOF
         done
@@ -559,6 +630,8 @@ runcmd:
 
 def forcad_user_data(root_pw: str, config_yaml: str) -> str:
     dns_lines = "\n".join(f"      nameserver {dns}" for dns in DNS_SERVERS) or "      nameserver 1.1.1.1"
+    forcad_addr = FORCAD_IP  # 10.10.10.10/31
+    forcad_gw = FORCAD_GW    # 10.10.10.11
     return f"""#cloud-config
 users:
   - name: root
@@ -593,8 +666,14 @@ write_files:
         version: 2
         ethernets:
           ens18:
-            addresses: [{FORCAD_IP}]
-            gateway4: {FORCAD_GW}
+            addresses: [{forcad_addr}]
+            routes:
+              - to: default
+                via: {forcad_gw}
+              - to: 10.58.57.0/24
+                via: {forcad_gw}
+              - to: 10.57.0.0/16
+                via: {forcad_gw}
             nameservers:
               addresses: [{', '.join(DNS_SERVERS) if DNS_SERVERS else '1.1.1.1'}]
   - path: /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
@@ -645,6 +724,11 @@ runcmd:
 
 
 def team_user_data(root_pw: str, allow_root_ssh: bool, team_ip: str, gateway_ip: str) -> str:
+    """
+    Cloud-init for a team VM.
+    team_ip:    e.g. 10.58.57.1/31  (isolated /31 point-to-point)
+    gateway_ip: e.g. 10.58.57.0     (GW side of the /31)
+    """
     ssh_pwauth = "true" if allow_root_ssh else "false"
     dns_lines = "\n".join(f"      nameserver {dns}" for dns in DNS_SERVERS) or "      nameserver 1.1.1.1"
     extra_write = ""
@@ -695,7 +779,13 @@ write_files:
         ethernets:
           ens18:
             addresses: [{team_ip}]
-            gateway4: {gateway_ip}
+            routes:
+              - to: default
+                via: {gateway_ip}
+              - to: 10.10.10.10/32
+                via: {gateway_ip}
+              - to: 10.58.57.0/24
+                via: {gateway_ip}
             nameservers:
               addresses: [{', '.join(DNS_SERVERS) if DNS_SERVERS else '1.1.1.1'}]
   - path: /etc/resolv.conf
@@ -737,7 +827,7 @@ def build_forcad_config(base_config: str, n_teams: int) -> str:
 
     lines = [base_config.rstrip(), "", "teams:"]
     for team in range(1, n_teams + 1):
-        lines.append(f"  - ip: 10.60.{team}.2")
+        lines.append(f"  - ip: {team_vm_addr(team)}")
         lines.append(f"    name: \"Team {team}\"")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
@@ -859,15 +949,19 @@ def main():
     print(f"\n[*] Configuration:")
     print(f"    Teams: {N_TEAMS}")
     print(f"    Proxmox: {PVE_HOST} (node: {PVE_NODE})")
-    print(f"    CTF Bridge: {BR_CTF} (10.0.0.0/8)")
+    print(f"    CTF Bridge: {BR_CTF}")
     if EXT_BRIDGE and EXT_GW_IP:
         print(f"    External Bridge: {EXT_BRIDGE} (VLAN: {EXT_VLAN or 'none'}, IP: {EXT_GW_IP})")
     print(f"    VMIDs: GW={VMID_GW}, ForcAD={VMID_FORCAD}, Teams={VMID_TEAM_BASE}+")
+    print(f"\n[*] Network topology (isolated /31 point-to-point):")
+    print(f"    ForcAD:  {FORCAD_IP} <-> GW {FORCAD_GW_SIDE}")
+    for t in range(1, N_TEAMS + 1):
+        print(f"    Team {t}:  {team_vm_ip(t)} <-> GW {team_gw_ip(t)}")
+    print(f"    WG:      Players 10.57.<team>.{{3..13}}/24, GW wg0 = {WG_GW_IP}")
     
     print("\n[*] Cloud-init will be created as ISO images")
     print(f"    - ISO storage: {ISO_STORAGE}")
     print(f"    - CTF bridge: {BR_CTF}")
-    print(f"    - Host NAT configured for {CTF_NET_CIDR} (if required)")
     
     ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
     creds_path = f"creds_{ts}.json"
@@ -907,7 +1001,9 @@ def main():
         "gateway": {
             "vm_name": "ctf-gw",
             "vmid": VMID_GW,
-            "ctf_ip": GW_CTF_IP,
+            "forcad_link_ip": FORCAD_GW_SIDE,
+            "team_link_ips": [team_gw_ip(t) for t in range(1, N_TEAMS + 1)],
+            "wg_ip": WG_GW_IP,
             "ext_ip": EXT_GW_IP or "none",
             "root_password": gw_password
         },
@@ -915,6 +1011,7 @@ def main():
             "vm_name": "forcad",
             "vmid": VMID_FORCAD,
             "ip": FORCAD_IP,
+            "gateway": FORCAD_GW,
             "root_password": forcad_password
         },
         "teams": []
@@ -929,7 +1026,7 @@ def main():
       gw_user_data(N_TEAMS, gw_password),
       "ctf-gw",
       tmpdir,
-      network_config=gw_network_config()
+      network_config=gw_network_config(N_TEAMS)
     )
     print(f"[✓] Created gateway ISO: {os.path.basename(gw_iso)}")
     
@@ -944,22 +1041,23 @@ def main():
     team_isos = {}
     for team in range(1, N_TEAMS + 1):
         pw = random_password(20)
-        team_ip = f"10.60.{team}.2/8"
+        t_ip = team_vm_ip(team)       # 10.58.57.(2N-1)/31
+        t_gw = team_gw_addr(team)     # 10.58.57.(2N-2)
         team_iso = create_cloud_init_iso(
-          team_user_data(pw, ALLOW_ROOT_SSH, team_ip, GW_CTF_ADDR),
+          team_user_data(pw, ALLOW_ROOT_SSH, t_ip, t_gw),
           f"team-{team}",
           tmpdir,
           extra_files=[(services_zip, "services.zip")]
         )
         team_isos[team] = team_iso
-        print(f"[✓] Created team {team} ISO: {os.path.basename(team_iso)}")
+        print(f"[✓] Created team {team} ISO: {os.path.basename(team_iso)} ({t_ip} -> gw {t_gw})")
         
         creds["teams"].append({
             "team": team,
             "vm_name": f"team-{team}",
             "vmid": VMID_TEAM_BASE + team,
-            "ip": team_ip,
-            "gateway": GW_CTF_ADDR,
+            "ip": t_ip,
+            "gateway": t_gw,
             "root_password": pw
         })
 
@@ -1022,7 +1120,7 @@ def main():
         "memory": GW_RAM_MB,
         "net0": f"virtio,bridge={BR_CTF},macaddr={generate_mac_address(VMID_GW, 0)}",
         "net1": f"{net1_config},macaddr={generate_mac_address(VMID_GW, 1)}",
-        "ipconfig0": f"ip={GW_CTF_IP}",
+        "ipconfig0": f"ip={FORCAD_GW_SIDE}",
         "ide2": f"{ISO_STORAGE}:iso/{os.path.basename(gw_iso)},media=cdrom",
         "agent": "enabled=1",
         "serial0": "socket"
@@ -1054,13 +1152,15 @@ def main():
     for team in range(1, N_TEAMS + 1):
         vmid = VMID_TEAM_BASE + team
         team_pw = creds["teams"][team - 1]["root_password"]
-        print(f"\n[*] Creating Team {team} VM (VMID {vmid})...")
+        t_ip = team_vm_ip(team)
+        t_gw = team_gw_addr(team)
+        print(f"\n[*] Creating Team {team} VM (VMID {vmid}, {t_ip} -> gw {t_gw})...")
         clone_vm(vmid, f"team-{team}")
         set_vm_config(
             vmid,
             cores=TEAM_CORES, memory=TEAM_RAM_MB,
             net0=f"virtio,bridge={BR_CTF},macaddr={generate_mac_address(vmid, 0)}",
-            ipconfig0=f"ip=10.60.{team}.2/8,gw={GW_CTF_ADDR}",
+            ipconfig0=f"ip={t_ip},gw={t_gw}",
             ide2=f"{ISO_STORAGE}:iso/{os.path.basename(team_isos[team])},media=cdrom",
             agent="enabled=1"
         )
@@ -1076,6 +1176,10 @@ def main():
     print("[+] Setup Complete!")
     print("="*60)
     print(f"    Credentials: {creds_path}")
+    print(f"    Network: isolated /31 point-to-point links")
+    print(f"    ForcAD:  {FORCAD_IP} (gw {FORCAD_GW})")
+    for t in range(1, N_TEAMS + 1):
+        print(f"    Team {t}:  {team_vm_ip(t)} (gw {team_gw_addr(t)})")
     print(f"    WireGuard configs: NOT DOWNLOADED")
     print(f"      Check on gateway: /var/log/wg-config-gen.log")
     print(f"      Configs will be in: /srv/wg-configs/")
