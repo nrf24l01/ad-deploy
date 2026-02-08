@@ -1,0 +1,4 @@
+.venv
+cloud-init*
+creds*
+data*
