@@ -1,0 +1,64 @@
+#cloud-config
+users:
+  - name: root
+    shell: /bin/bash
+    lock_passwd: false
+
+chpasswd:
+  expire: false
+  users:
+    - name: root
+      password: {{ root_pw }}
+      type: text
+
+ssh_pwauth: {{ 'true' if allow_root_ssh else 'false' }}
+disable_root: false
+
+package_update: true
+package_upgrade: false
+packages:
+  - curl
+  - ca-certificates
+
+write_files:
+  - path: /etc/resolv.conf
+    permissions: "0644"
+    content: |
+{% for dns in dns_servers %}
+      nameserver {{ dns }}
+{% endfor %}
+{% if allow_root_ssh %}
+
+  - path: /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+
+  - path: /etc/ssh/sshd_config.d/50-cloud-init.conf
+    content: |
+      PasswordAuthentication yes
+      PermitRootLogin yes
+      PubkeyAuthentication yes
+{% endif %}
+
+runcmd:
+  - systemctl disable --now systemd-resolved 2>/dev/null || true
+  - rm -f /etc/resolv.conf
+  - 'echo "nameserver 1.1.1.1" > /etc/resolv.conf'
+  - 'echo "nameserver 8.8.8.8" >> /etc/resolv.conf'
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+  - mkdir -p /mnt/cidata
+  - CIDATA_DEV=$(blkid -L cidata 2>/dev/null || true)
+  - if [ -z "$CIDATA_DEV" ] && [ -e /dev/disk/by-label/cidata ]; then CIDATA_DEV=/dev/disk/by-label/cidata; fi
+  - if [ -z "$CIDATA_DEV" ] && [ -e /dev/sr0 ]; then CIDATA_DEV=/dev/sr0; fi
+  - if [ -z "$CIDATA_DEV" ] && [ -e /dev/cdrom ]; then CIDATA_DEV=/dev/cdrom; fi
+  - if [ -n "$CIDATA_DEV" ]; then mount -o ro "$CIDATA_DEV" /mnt/cidata || true; fi
+  - if [ -f /mnt/cidata/services.zip ]; then cp /mnt/cidata/services.zip /root/services.zip; fi
+  - umount /mnt/cidata 2>/dev/null || true
+{% if allow_root_ssh %}
+  - systemctl daemon-reload
+  - systemctl restart serial-getty@ttyS0.service
+  - systemctl restart ssh || systemctl restart sshd || true
+{% endif %}

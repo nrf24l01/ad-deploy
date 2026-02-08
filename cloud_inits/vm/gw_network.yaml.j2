@@ -1,0 +1,19 @@
+{# Netplan network-config for GW: multiple /31 addresses on ens18 #}
+version: 2
+ethernets:
+  ens18:
+    addresses: [{{ forcad_gw_side }}{% for t in range(1, n_teams + 1) %}, 10.58.57.{{ 2 * t - 2 }}/31{% endfor %}]
+    nameservers:
+      addresses: [{{ dns_servers | join(', ') }}]
+{% if ext_gw_ip and ext_gw_gateway %}
+  ens19:
+    addresses: [{{ ext_gw_ip }}]
+    routes:
+      - to: default
+        via: {{ ext_gw_gateway }}
+    nameservers:
+      addresses: [{{ dns_servers | join(', ') }}]
+{% else %}
+  ens19:
+    dhcp4: false
+{% endif %}

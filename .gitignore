@@ -2,3 +2,6 @@
 cloud-init*
 creds*
 data*
+.env
+*.pyc
+__pycache__

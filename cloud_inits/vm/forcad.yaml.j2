@@ -1,0 +1,90 @@
+#cloud-config
+users:
+  - name: root
+    shell: /bin/bash
+    lock_passwd: false
+
+chpasswd:
+  expire: false
+  users:
+    - name: root
+      password: {{ root_pw }}
+      type: text
+
+ssh_pwauth: true
+disable_root: false
+
+package_update: true
+package_upgrade: false
+packages:
+  - git
+  - python3
+  - python3-pip
+  - python3-venv
+  - python3-full
+  - curl
+  - ca-certificates
+  - unzip
+
+write_files:
+  - path: /root/forcad-config.yml
+    permissions: "0600"
+    content: |
+{{ config_yaml | indent(6, first=True) }}
+
+  - path: /etc/systemd/system/serial-getty@ttyS0.service.d/autologin.conf
+    content: |
+      [Service]
+      ExecStart=
+      ExecStart=-/sbin/agetty --autologin root --noclear %I $TERM
+
+  - path: /etc/ssh/sshd_config.d/99-ctf-forcad.conf
+    permissions: "0644"
+    content: |
+      PasswordAuthentication yes
+      PermitRootLogin yes
+      SyslogFacility AUTHPRIV
+      LogLevel VERBOSE
+
+  - path: /etc/resolv.conf
+    permissions: "0644"
+    content: |
+{% for dns in dns_servers %}
+      nameserver {{ dns }}
+{% endfor %}
+
+runcmd:
+  - systemctl daemon-reload
+  - systemctl restart serial-getty@ttyS0.service
+  - sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - systemctl restart ssh || systemctl restart sshd || true
+  - systemctl disable --now systemd-resolved 2>/dev/null || true
+  - rm -f /etc/resolv.conf
+  - 'echo "nameserver 1.1.1.1" > /etc/resolv.conf'
+  - 'echo "nameserver 8.8.8.8" >> /etc/resolv.conf'
+  - apt-get update
+  - apt-get install -y python3-pip python3-venv python3-full unzip
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+  - cd /root && git clone https://github.com/pomo-mondreganto/ForcAD.git && cd ForcAD && git checkout master
+  - cd /root/ForcAD && pip3 install --break-system-packages -r cli/requirements.txt
+  # Move config.yml BEFORE setup so control.py can find it
+  - cp /root/forcad-config.yml /root/ForcAD/config.yml
+  # Extract checkers from cloud-init ISO BEFORE setup
+  - mkdir -p /root/ForcAD/checkers
+  - mkdir -p /mnt/cidata
+  - CIDATA_DEV=$(blkid -L cidata 2>/dev/null || true)
+  - if [ -z "$CIDATA_DEV" ] && [ -e /dev/disk/by-label/cidata ]; then CIDATA_DEV=/dev/disk/by-label/cidata; fi
+  - if [ -z "$CIDATA_DEV" ] && [ -e /dev/sr0 ]; then CIDATA_DEV=/dev/sr0; fi
+  - if [ -z "$CIDATA_DEV" ] && [ -e /dev/cdrom ]; then CIDATA_DEV=/dev/cdrom; fi
+  - if [ -n "$CIDATA_DEV" ]; then mount -o ro "$CIDATA_DEV" /mnt/cidata || true; fi
+  - if [ -f /mnt/cidata/forcad-checkers.zip ]; then cp /mnt/cidata/forcad-checkers.zip /root/forcad-checkers.zip; fi
+  - if [ -f /root/forcad-checkers.zip ]; then unzip -o /root/forcad-checkers.zip -d /root/ForcAD/checkers || true; fi
+  - if [ -d /root/ForcAD/checkers/checkers ]; then mv /root/ForcAD/checkers/checkers/* /root/ForcAD/checkers/; rmdir /root/ForcAD/checkers/checkers || true; fi
+  - umount /mnt/cidata 2>/dev/null || true
+  # Make all checker scripts executable
+  - find /root/ForcAD/checkers -name 'checker.py' -exec chmod +x {} +
+  # Now run setup + start (config.yml and checkers are in place)
+  - cd /root/ForcAD && python3 ./control.py setup
+  - cd /root/ForcAD && python3 ./control.py start --fast

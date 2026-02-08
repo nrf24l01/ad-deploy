@@ -1,0 +1,12 @@
+[Unit]
+Description=FRP Client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/frpc -c /etc/frp/frpc.ini
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

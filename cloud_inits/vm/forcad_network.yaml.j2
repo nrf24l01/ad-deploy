@@ -1,0 +1,14 @@
+{# Netplan network-config for ForcAD: single /31 point-to-point link #}
+version: 2
+ethernets:
+  ens18:
+    addresses: [{{ forcad_ip }}]
+    routes:
+      - to: default
+        via: {{ forcad_gw }}
+      - to: 10.58.57.0/24
+        via: {{ forcad_gw }}
+      - to: 10.57.0.0/16
+        via: {{ forcad_gw }}
+    nameservers:
+      addresses: [{{ dns_servers | join(', ') }}]

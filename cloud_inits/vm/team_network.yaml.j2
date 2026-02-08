@@ -1,0 +1,14 @@
+{# Netplan network-config for team VM: single /31 point-to-point link #}
+version: 2
+ethernets:
+  ens18:
+    addresses: [{{ team_ip }}]
+    routes:
+      - to: default
+        via: {{ gateway_ip }}
+      - to: 10.10.10.10/32
+        via: {{ gateway_ip }}
+      - to: 10.58.57.0/24
+        via: {{ gateway_ip }}
+    nameservers:
+      addresses: [{{ dns_servers | join(', ') }}]

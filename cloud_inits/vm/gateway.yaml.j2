@@ -1,0 +1,115 @@
+#cloud-config
+hostname: ctf-gw
+manage_etc_hosts: true
+
+users:
+  - name: root
+    shell: /bin/bash
+    lock_passwd: false
+  - name: user
+    shell: /bin/bash
+    lock_passwd: false
+
+chpasswd:
+  expire: false
+  users:
+    - name: root
+      password: {{ root_pw }}
+      type: text
+    - name: user
+      password: user
+      type: text
+
+ssh_pwauth: true
+disable_root: false
+
+package_update: true
+package_upgrade: false
+packages:
+  - nftables
+  - wireguard
+  - wireguard-tools
+  - iproute2
+  - curl
+  - zip
+
+write_files:
+  - path: /root/zip-wg-configs.sh
+    permissions: "0755"
+    content: |
+{{ zip_wg_sh | indent(6, first=True) }}
+
+  - path: /etc/ssh/sshd_config
+    permissions: "0644"
+    content: |
+{{ sshd_config | indent(6, first=True) }}
+
+  - path: /etc/resolv.conf
+    permissions: "0644"
+    content: |
+{% for dns in dns_servers %}
+      nameserver {{ dns }}
+{% endfor %}
+
+  - path: /etc/sysctl.d/99-ipforward.conf
+    permissions: "0644"
+    content: |
+      net.ipv4.ip_forward=1
+
+  - path: /etc/nftables.conf
+    permissions: "0644"
+    content: |
+{{ nftables_conf | indent(6, first=True) }}
+
+{% if frp_enabled %}
+  - path: /etc/frp/frpc.ini
+    permissions: "0644"
+    content: |
+{{ frpc_ini | indent(6, first=True) }}
+
+  - path: /etc/systemd/system/frpc.service
+    permissions: "0644"
+    content: |
+{{ frpc_service | indent(6, first=True) }}
+{% endif %}
+
+  - path: /root/generate-wg-configs.sh
+    permissions: "0755"
+    content: |
+{{ generate_wg_sh | indent(6, first=True) }}
+
+runcmd:
+  - systemctl daemon-reload
+  - sysctl --system
+  - netplan apply
+{% if ext_gw_ip and ext_gw_gateway %}
+  - ip route replace default via {{ ext_gw_gateway }} dev ens19
+{% else %}
+  # no external gateway configured
+{% endif %}
+  - resolvectl dns ens18 {{ dns_servers | join(' ') }} || true
+  - systemctl disable --now systemd-resolved tailscaled 2>/dev/null || true
+  - rm -f /etc/ssh/sshd_config.d/50-cloud-init.conf /etc/ssh/sshd_config.d/60-cloud-init.conf || true
+  - systemctl daemon-reload
+  - systemctl restart serial-getty@ttyS0.service
+  - systemctl restart ssh || systemctl restart sshd || true
+  - systemctl enable --now nftables
+  - nft -f /etc/nftables.conf
+
+  # WireGuard: install, generate configs then start wg0
+  - apt update
+  - apt install -y wireguard
+  - mkdir -p /etc/wireguard
+  - /root/generate-wg-configs.sh
+  - systemctl enable --now wg-quick@wg0
+  - /root/zip-wg-configs.sh
+{% if frp_enabled %}
+
+  # FRP client install + service
+  - sh -lc 'set -e; cd /tmp;
+            curl -fsSL https://github.com/fatedier/frp/releases/download/v{{ frp_ver }}/frp_{{ frp_ver }}_linux_amd64.tar.gz -o frp.tgz;
+            tar -xzf frp.tgz;
+            install -m 0755 frp_{{ frp_ver }}_linux_amd64/frpc /usr/local/bin/frpc'
+  - systemctl daemon-reload
+  - systemctl enable --now frpc
+{% endif %}
