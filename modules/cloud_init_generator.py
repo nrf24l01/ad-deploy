@@ -95,6 +95,7 @@ def gw_user_data(n_teams: int, root_pw: str, **extra) -> str:
         wg_endpoint=extra.get("wg_endpoint", ""),
         frp_server=extra.get("frp_server", ""),
         frp_port=extra.get("frp_port", 7000),
+        teams=extra.get("teams", []),
     )
     generate_wg_sh = render_config_file("generate-wg-configs.sh", **tpl_vars)
     zip_wg_sh = render_config_file("zip-wg-configs.sh", **tpl_vars)

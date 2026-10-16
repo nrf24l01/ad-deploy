@@ -173,7 +173,15 @@ def generate_mac_address(vmid: int, interface: int = 0) -> str:
     # Team VM
     team_num = vmid - VMID_TEAM_BASE
     base_parts = MAC_TEAM_BASE.split(":")
+    if len(base_parts) != 6:
+        raise ValueError(
+            f"MAC_TEAM_BASE must be a 6-octet MAC address, got {MAC_TEAM_BASE!r}"
+        )
     last_byte = int(base_parts[-1], 16) + team_num
+    if not (0 <= last_byte <= 0xFF):
+        raise ValueError(
+            f"MAC_TEAM_BASE last byte overflows for team {team_num}"
+        )
     mac_parts = base_parts[:-1] + [f"{last_byte:02x}"]
     return ":".join(mac_parts)
 

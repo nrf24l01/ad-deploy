@@ -1,0 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ad-deploy"
+version = "0.1.0"
+description = "Deploy a CTF lab on Proxmox (cloud-init ISOs, VM clones, networking)"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests",
+    "urllib3",
+    "proxmoxer",
+    "pyyaml",
+    "jinja2",
+]
+
+[project.scripts]
+ad-deploy = "main:main"
+
+[tool.hatch.build.targets.wheel]
+include = [
+    "main.py",
+    "modules/*.py",
+    "cloud_inits/**/*",
+    "deploy.example.yaml",
+]

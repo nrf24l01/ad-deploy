@@ -8,7 +8,7 @@ Deploys a CTF lab on Proxmox by:
 - applying VM networking and hardware configuration
 - starting the full lab
 
-The script reads its configuration from environment variables in a `.env` file and expects supporting payload files under `data/`.
+The script reads its configuration from a `deploy.yaml` file and expects supporting payload files under `data/`.
 
 ## What It Creates
 
@@ -30,15 +30,16 @@ You need:
 
 - `uv`
 - `genisoimage` or `mkisofs`
+- `sshpass` (only needed to automatically download the WireGuard configs from the gateway)
 - access to a Proxmox VE host
 - a prepared Proxmox VM template with cloud-init support
 - a Proxmox API token with permission to clone VMs, configure them, and upload ISOs
 
-System package example on Debian/Ubuntu:
+System packages example on Debian/Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y genisoimage
+sudo apt-get install -y genisoimage sshpass
 ```
 
 Install `uv` if it is not already present:
@@ -47,27 +48,31 @@ Install `uv` if it is not already present:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-## Python Dependencies
+## Install
 
-This repository currently does not include a `pyproject.toml`, so use `uv` with a virtual environment and `uv pip`.
+This project is a standard `uv` project: dependencies are declared in `pyproject.toml`, so `uv` handles the environment automatically.
 
-Create the environment:
-
-```bash
-uv venv
-```
-
-Install runtime dependencies into that environment:
+Run in place (recommended while developing):
 
 ```bash
-uv pip install requests urllib3 proxmoxer python-dotenv jinja2
+uv sync            # create .venv and install dependencies from pyproject.toml
+uv run main.py
 ```
+
+Or install it as a tool for a globally available `ad-deploy` command:
+
+```bash
+uv tool install .
+ad-deploy
+```
+
+Either way, `uv` resolves the same dependencies (`requests`, `urllib3`, `proxmoxer`, `pyyaml`, `jinja2`).
 
 ## Required Project Files
 
 Before running the deploy script, make sure these paths exist:
 
-- `.env`
+- `deploy.yaml`
 - `data/config.yaml`
 - `data/checkers/`
 - `data/services/`
@@ -79,73 +84,79 @@ The script zips `data/checkers/` and `data/services/` and injects them into the 
 Start from the example file:
 
 ```bash
-cp .env.example .env
+cp deploy.example.yaml deploy.yaml
 ```
 
-Important variables in `.env`:
+Then edit `deploy.yaml` with your real Proxmox and network values.
 
 ### Proxmox
 
-- `PVE_HOST`: full Proxmox URL, for example `https://pve.example.org:8006`
-- `PVE_PORT`: Proxmox API port, usually `8006`
-- `PVE_NODE`: target Proxmox node name
-- `PVE_TOKEN_ID`: token id in the form `user@realm!tokenname`
-- `PVE_TOKEN_SECRET`: token secret
-- `VERIFY_TLS`: `1` to verify TLS, `0` to skip verification
+- `proxmox.host`: full Proxmox URL, for example `https://pve.example.org:8006`
+- `proxmox.port`: Proxmox API port, usually `8006`
+- `proxmox.node`: target Proxmox node name
+- `proxmox.token_id`: token id in the form `user@realm!tokenname`
+- `proxmox.token_secret`: token secret
+- `proxmox.verify_tls`: `true` to verify TLS, `false` to skip
 
 ### Template and Storage
 
-- `TEMPLATE_VMID`: VMID of the prepared source template
-- `ISO_STORAGE`: Proxmox storage name where ISOs are uploaded
+- `template.vmid`: VMID of the prepared source template
+- `template.clone_full`: `true` for full clone, `false` for linked clone
+- `storage.iso`: Proxmox storage name where ISOs are uploaded
 
 The storage must allow `ISO image` content.
 
 ### Lab Size and VM IDs
 
-- `N_TEAMS`: number of team VMs to create
-- `VMID_GW`: gateway VMID
-- `VMID_FORCAD`: ForcAD VMID
-- `VMID_TEAM_BASE`: base VMID for team VMs
+- `lab.n_teams`: number of team VMs to create
+- `vmids.gateway`: gateway VMID
+- `vmids.forcad`: ForcAD VMID
+- `vmids.team_base`: base VMID for team VMs
 
-Team VMIDs are generated as `VMID_TEAM_BASE + team_number`.
+Team VMIDs are generated as `team_base + team_number`.
 
 ### Networking
 
-- `BR_CTF`: internal bridge for the isolated lab network
-- `EXT_BRIDGE`: external bridge for gateway `net1`
-- `EXT_VLAN`: optional VLAN tag for `net1`
-- `EXT_GW_IP`: optional external IP for the gateway
-- `EXT_GW_GATEWAY`: optional external gateway
-- `DNS_SERVERS`: comma-separated DNS servers
-- `FORCAD_IP`: ForcAD address with CIDR
-- `FORCAD_GW_SIDE`: gateway-side address with CIDR on the ForcAD link
-- `WG_GW_IP`: WireGuard gateway IP
+- `network.ctf_bridge`: internal bridge for the isolated lab network
+- `network.external.bridge`: external bridge for gateway `net1`
+- `network.external.vlan`: optional VLAN tag for `net1` (blank for none)
+- `network.external.ip`: optional external IP for the gateway
+- `network.external.gateway`: optional external gateway
+- `network.dns_servers`: list of DNS servers
+- `ip_plan.forcad_ip`: ForcAD address with CIDR
+- `ip_plan.forcad_gw_side`: gateway-side address with CIDR on the ForcAD link
+- `ip_plan.wg_gw_ip`: WireGuard gateway IP
 
 ### Resources
 
-- `TEAM_CORES`, `TEAM_RAM_MB`
-- `FORCAD_CORES`, `FORCAD_RAM_MB`
-- `GW_CORES`, `GW_RAM_MB`
+- `resources.team.cores` / `resources.team.ram_mb`
+- `resources.forcad.cores` / `resources.forcad.ram_mb`
+- `resources.gateway.cores` / `resources.gateway.ram_mb`
 
 ### Optional Features
 
-- `ALLOW_ROOT_SSH`: `1` to allow root password SSH on team VMs
-- `POOL_ID`: Proxmox pool to use or create
-- `CLONE_FULL`: `1` for full clone, `0` for linked clone
-- `WG_PORT`, `WG_ENDPOINT`: WireGuard settings
-- `FRP_ENABLED`, `FRP_SERVER`, `FRP_PORT`, `FRP_VER`: FRP settings for the gateway
+- `lab.allow_root_ssh`: `true` to allow root password SSH on team VMs
+- `lab.pool`: Proxmox pool to use or create
+- `wireguard.port`, `wireguard.endpoint`: WireGuard settings
+- `wireguard.scp`: export the generated WireGuard configs to this machine after the lab starts
+  - `enabled`: `true` to download them automatically
+  - `host`: gateway SSH address (defaults to `network.external.ip`)
+  - `port` / `user`: SSH target (default `22` / `root`)
+  - `output_dir`: local directory for the downloaded archives (default `wg-configs/`)
+  - `wait_timeout_sec`, `poll_interval_sec`: how long to wait for the gateway to finish
+  - requires `sshpass` on this machine; downloads `admin.zip` and `teamN.zip` from the gateway
+- `frp.enabled`, `frp.server`, `frp.port`, `frp.ver`: FRP settings for the gateway
 
 ## How To Use
 
 ### 1. Prepare the environment
 
 ```bash
-uv venv
-uv pip install requests urllib3 proxmoxer python-dotenv jinja2
-cp .env.example .env
+uv sync
+cp deploy.example.yaml deploy.yaml
 ```
 
-Then edit `.env` with your real Proxmox and network values.
+Then edit `deploy.yaml` with your real Proxmox and network values.
 
 ### 2. Add input data
 
@@ -170,7 +181,7 @@ uv run main.py
 
 When you run `uv run main.py`, the script will:
 
-1. load configuration from `.env`
+1. load configuration from `deploy.yaml`
 2. create a Proxmox pool if needed
 3. build temporary cloud-init ISO files in a timestamped local directory
 4. zip and include `data/checkers/` and `data/services/`
@@ -180,6 +191,7 @@ When you run `uv run main.py`, the script will:
 8. clone new VMs from the template
 9. configure CPU, memory, NICs, IP config, and attached cloud-init ISOs
 10. start all VMs
+11. download the WireGuard config archives (`admin.zip`, `teamN.zip`) from the gateway via scp (if enabled)
 
 ## Output Files
 
@@ -187,6 +199,7 @@ Each run generates:
 
 - a temporary local directory like `cloud-init_YYYYMMDD_HHMMSS/`
 - a credentials file like `creds_YYYYMMDD_HHMMSS.json`
+- a `wg-configs/` directory with the WireGuard client archives (if export is enabled)
 
 The credentials JSON contains generated passwords and addressing information for the deployed lab.
 
@@ -194,25 +207,21 @@ The credentials JSON contains generated passwords and addressing information for
 
 - The script destroys existing VMs that use the configured VMIDs before recreating them.
 - If ISO uploads fail, the script stops before VM recreation completes.
-- The Proxmox storage configured by `ISO_STORAGE` must support ISO uploads.
+- The Proxmox storage configured by `storage.iso` must support ISO uploads.
 - If neither `genisoimage` nor `mkisofs` is installed, ISO creation fails.
-- `uv run main.py` relies on the dependencies being installed into the current `uv` environment because this repo does not yet define them in a `pyproject.toml`.
+- `deploy.yaml` is gitignored; commit `deploy.example.yaml` instead. Keep the Proxmox token secret out of version control.
 
 ## Troubleshooting
 
 ### Missing Python modules
 
-Install dependencies with:
-
-```bash
-uv pip install requests urllib3 proxmoxer python-dotenv jinja2
-```
+Run `uv sync` to install all dependencies from `pyproject.toml` into the project environment.
 
 ### ISO upload errors
 
 Check:
 
-- `ISO_STORAGE` points to the correct Proxmox storage
+- `storage.iso` points to the correct Proxmox storage
 - the storage has `ISO image` content enabled
 - the API token has permission to allocate space on that storage
 
@@ -228,8 +237,9 @@ sudo apt-get install -y genisoimage
 
 If your Proxmox instance uses a self-signed certificate, set:
 
-```dotenv
-VERIFY_TLS=0
+```yaml
+proxmox:
+  verify_tls: false
 ```
 
 Use that only when appropriate for your environment.

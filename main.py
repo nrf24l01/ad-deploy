@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
 from modules.config import (
@@ -22,6 +23,7 @@ from modules.config import (
     TEAM_CORES, TEAM_RAM_MB,
     WG_PORT, WG_ENDPOINT,
     FRP_ENABLED, FRP_SERVER, FRP_PORT, FRP_VER,
+    WG_SCP_ENABLED, WG_SCP_HOST, WG_SCP_OUTPUT_DIR,
 )
 from modules.network import (
     team_vm_ip, team_gw_ip, team_vm_addr, team_gw_addr,
@@ -33,6 +35,7 @@ from modules.proxmox_api import (
     clone_vm, set_vm_config, start_vm,
     generate_mac_address, upload_iso,
 )
+from modules.wg_export import download_wg_configs
 from modules.cloud_init_generator import (
     gw_network_config, gw_user_data,
     forcad_user_data, forcad_network_config,
@@ -91,6 +94,16 @@ def main() -> None:
     print(f"\n[*] Generating cloud-init configs for {N_TEAMS} teams...")
     gw_password = random_password(20)
     forcad_password = random_password(20)
+    team_passwords: list[str] = [random_password(20) for _ in range(N_TEAMS)]
+    teams_info: list[dict] = [
+        {
+            "team": t,
+            "ip": team_vm_addr(t),
+            "user": "root",
+            "password": team_passwords[t - 1],
+        }
+        for t in range(1, N_TEAMS + 1)
+    ]
 
     creds: dict = {
         "generated_at_utc": ts,
@@ -126,6 +139,7 @@ def main() -> None:
         frp_server=FRP_SERVER,
         frp_port=FRP_PORT,
         frp_ver=FRP_VER,
+        teams=teams_info,
     )
 
     # Create cloud-init ISOs
@@ -160,7 +174,7 @@ def main() -> None:
 
     team_isos: dict[int, str] = {}
     for team in range(1, N_TEAMS + 1):
-        pw = random_password(20)
+        pw = team_passwords[team - 1]
         t_ip = team_vm_ip(team)
         t_gw = team_gw_addr(team)
         team_iso = create_cloud_init_iso(
@@ -212,11 +226,11 @@ def main() -> None:
     print(f"\n[✓] Snippet files ready in {tmpdir}")
     print(f"[✓] Credentials written to {creds_path}")
 
-    # Destroy old VMs
+    # Destroy old VMs (threaded — stop + destroy run in parallel)
     print(f"\n[*] Cleaning up existing VMs...")
     all_vmids = [VMID_GW, VMID_FORCAD] + [VMID_TEAM_BASE + i for i in range(1, N_TEAMS + 1)]
-    for vmid in all_vmids:
-        destroy_vm_if_exists(vmid)
+    with ThreadPoolExecutor(max_workers=min(8, len(all_vmids))) as executor:
+        list(executor.map(destroy_vm_if_exists, all_vmids))
     print(f"[✓] Cleanup complete")
 
     # -------- Create Gateway --------
@@ -288,6 +302,17 @@ def main() -> None:
     for team in range(1, N_TEAMS + 1):
         start_vm(VMID_TEAM_BASE + team)
 
+    # -------- Download WireGuard configs from the gateway --------
+    if WG_SCP_ENABLED and WG_SCP_HOST:
+        try:
+            download_wg_configs(WG_SCP_HOST, gw_password, N_TEAMS)
+        except Exception as e:
+            print(f"\n[!] WireGuard config download failed: {e}")
+            print(f"    Configs remain on the gateway under /srv/wg-configs/")
+    else:
+        print(f"\n[!] WireGuard config download skipped: no external host configured "
+              f"(set network.external.ip or wireguard.scp.host)")
+
     print("\n" + "=" * 60)
     print("[+] Setup Complete!")
     print("=" * 60)
@@ -296,9 +321,12 @@ def main() -> None:
     print(f"    ForcAD:  {FORCAD_IP} (gw {FORCAD_GW})")
     for t in range(1, N_TEAMS + 1):
         print(f"    Team {t}:  {team_vm_ip(t)} (gw {team_gw_addr(t)})")
-    print(f"    WireGuard configs: NOT DOWNLOADED")
-    print(f"      Check on gateway: /var/log/wg-config-gen.log")
-    print(f"      Configs will be in: /srv/wg-configs/")
+    if WG_SCP_ENABLED and WG_SCP_HOST:
+        print(f"    WireGuard configs: {WG_SCP_OUTPUT_DIR}/")
+    else:
+        print(f"    WireGuard configs: NOT DOWNLOADED")
+        print(f"      Check on gateway: /var/log/wg-config-gen.log")
+        print(f"      Configs will be in: /srv/wg-configs/")
     print("    FRP client on GW forwards only UDP WireGuard port.")
 
 

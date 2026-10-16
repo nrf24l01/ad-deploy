@@ -1,0 +1,78 @@
+# Deploy configuration for the CTF lab on Proxmox.
+# Copy this file to deploy.yaml and fill in your real values.
+proxmox:
+  host: "https://pve.example.org:8006"   # Proxmox URL (include https:// and port)
+  port: 8006
+  node: pve-node-name                    # Proxmox node name
+  token_id: "user@pve!tokenid"           # API token id (user@realm!name)
+  token_secret: "REPLACE_WITH_SECRET"    # API token secret
+  verify_tls: false                      # true to verify TLS certs, false to skip
+
+template:
+  vmid: 9000                             # VMID of the prepared template
+  clone_full: false                      # true = full clone, false = linked clone
+
+storage:
+  iso: local                             # Storage where cloud-init ISOs are uploaded
+  iso_dir: /var/lib/vz/template/iso
+
+lab:
+  n_teams: 4                             # Number of team VMs to create
+  pool: ctf                              # Proxmox pool to use or create
+  allow_root_ssh: true                   # Allow password SSH for root on team VMs
+
+vmids:
+  gateway: 700
+  forcad: 710
+  team_base: 720                         # Team VMIDs are team_base + team_number
+
+resources:
+  gateway:
+    cores: 2
+    ram_mb: 1024
+  forcad:
+    cores: 2
+    ram_mb: 4096
+  team:
+    cores: 2
+    ram_mb: 4096
+
+network:
+  ctf_bridge: vmbr10                     # Bridge used for CTF internal network
+  dns_servers:
+    - 1.1.1.1
+    - 8.8.8.8
+  external:                              # External network on net1 (optional)
+    bridge: vmbr0
+    vlan: 57                             # Optional VLAN tag (blank/none = none)
+    ip: "10.0.57.2/24"                   # External IP on net1 (optional)
+    gateway: "10.0.57.1"                 # External gateway IP (optional)
+
+ip_plan:                                 # Point-to-point /31 links
+  forcad_ip: "10.10.10.10/31"
+  forcad_gw_side: "10.10.10.11/31"
+  wg_gw_ip: "10.10.10.1"
+
+wireguard:
+  port: 51820
+  endpoint: ""                           # Public endpoint host:port (optional)
+  scp:                                   # Export generated configs to this machine
+    enabled: true
+    host: ""                             # Gateway SSH address (default: network.external.ip)
+    port: 22
+    user: root
+    output_dir: "wg-configs"             # Local directory to store the archives
+    wait_timeout_sec: 600                # Wait for gateway to finish cloud-init
+    poll_interval_sec: 15
+
+frp:
+  enabled: false
+  server: ""
+  port: 7000
+  ver: "0.52.3"
+
+mac:                                     # MAC seeds for deterministic generation
+  gw_net0: "02:00:00:02:BC:00"
+  gw_net1: "02:00:00:02:BC:01"
+  forcad_net0: "02:00:00:02:C6:00"
+  team_base: "02:00:00:02:D0:00"
