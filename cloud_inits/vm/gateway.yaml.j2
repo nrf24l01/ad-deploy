@@ -32,13 +32,9 @@ packages:
   - iproute2
   - curl
   - zip
+  - unzip
 
 write_files:
-  - path: /root/zip-wg-configs.sh
-    permissions: "0755"
-    content: |
-{{ zip_wg_sh | indent(6, first=True) }}
-
   - path: /etc/ssh/sshd_config
     permissions: "0644"
     content: |
@@ -73,10 +69,10 @@ write_files:
 {{ frpc_service | indent(6, first=True) }}
 {% endif %}
 
-  - path: /root/generate-wg-configs.sh
+  - path: /root/install-wg-configs.sh
     permissions: "0755"
     content: |
-{{ generate_wg_sh | indent(6, first=True) }}
+{{ install_wg_sh | indent(6, first=True) }}
 
 runcmd:
   - systemctl daemon-reload
@@ -96,13 +92,11 @@ runcmd:
   - systemctl enable --now nftables
   - nft -f /etc/nftables.conf
 
-  # WireGuard: install, generate configs then start wg0
+  # WireGuard: install the configs generated on the deploy host
   - apt update
   - apt install -y wireguard
   - mkdir -p /etc/wireguard
-  - /root/generate-wg-configs.sh
-  - systemctl enable --now wg-quick@wg0
-  - /root/zip-wg-configs.sh
+  - /root/install-wg-configs.sh
 {% if frp_enabled %}
 
   # FRP client install + service

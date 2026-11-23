@@ -42,6 +42,24 @@ def _req(section: str, key: str) -> str:
     return str(value)
 
 
+# ===================== AD source =====================
+_ad = _cfg.get("ad") or {}
+AD_REPO_URL: str = str(
+    _ad.get("repository", "https://github.com/C4T-BuT-S4D/ctfcup-2024-ad.git")
+)
+AD_REPO_REF: str = str(_ad.get("ref", "master"))
+AD_START_TIME: str = str(_ad.get("start_time", "") or "")
+# Optional local overlay directory merged over the cloned AD source. Use it
+# when the upstream repo is not deployment-ready (missing ForcAD config,
+# generated files, per-service pre-start hooks).
+AD_OVERLAY: str = str(_ad.get("overlay", "") or "")
+# Optional explicit service -> checker port mapping for ForcAD task names.
+AD_TASK_PORTS: dict[str, int] = {
+    str(name): int(port)
+    for name, port in (_ad.get("task_ports", {}) or {}).items()
+}
+
+
 # ===================== Proxmox API =====================
 PVE_HOST: str = _req("proxmox", "host")
 PVE_PORT: int = int(_cfg.get("proxmox", {}).get("port", 8006))
@@ -97,17 +115,9 @@ WG_GW_IP: str = str(_ip.get("wg_gw_ip", "10.10.10.1"))
 # WireGuard + FRP
 WG_PORT: int = int(_cfg.get("wireguard", {}).get("port", 51820))
 WG_ENDPOINT: str = str(_cfg.get("wireguard", {}).get("endpoint", "") or "")
-
-# WireGuard config export (scp from gateway)
-EXT_GW_HOST: str = EXT_GW_IP.split("/")[0] if EXT_GW_IP else ""
-_scp = _cfg.get("wireguard", {}).get("scp", {})
-WG_SCP_ENABLED: bool = bool(_scp.get("enabled", True))
-WG_SCP_HOST: str = str(_scp.get("host", "") or "") or EXT_GW_HOST
-WG_SCP_PORT: int = int(_scp.get("port", 22))
-WG_SCP_USER: str = str(_scp.get("user", "root"))
-WG_SCP_OUTPUT_DIR: str = str(_scp.get("output_dir", "wg-configs"))
-WG_SCP_WAIT_TIMEOUT_SEC: int = int(_scp.get("wait_timeout_sec", 600))
-WG_SCP_POLL_SEC: int = int(_scp.get("poll_interval_sec", 15))
+# WireGuard configs are generated on this machine and copied to the gateway
+# through the cloud-init ISO. This is where the client archives land locally.
+WG_OUTPUT_DIR: str = str(_cfg.get("wireguard", {}).get("output_dir", "wg-configs"))
 
 _frp = _cfg.get("frp", {})
 FRP_ENABLED: bool = bool(_frp.get("enabled", True))

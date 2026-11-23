@@ -68,7 +68,7 @@ runcmd:
   - curl -fsSL https://get.docker.com | sh
   - systemctl enable --now docker
   - cd /root && git clone https://github.com/pomo-mondreganto/ForcAD.git && cd ForcAD && git checkout master
-  - cd /root/ForcAD && pip3 install --break-system-packages -r cli/requirements.txt
+  - cd /root/ForcAD && for i in 1 2 3 4 5; do pip3 install --break-system-packages --retries 10 --timeout 60 -r cli/requirements.txt && break; echo "pip attempt $i failed, retrying"; sleep 10; done
   # Move config.yml BEFORE setup so control.py can find it
   - cp /root/forcad-config.yml /root/ForcAD/config.yml
   # Extract checkers from cloud-init ISO BEFORE setup
@@ -85,6 +85,16 @@ runcmd:
   - umount /mnt/cidata 2>/dev/null || true
   # Make all checker scripts executable
   - find /root/ForcAD/checkers -name 'checker.py' -exec chmod +x {} +
+  # Checkers can reference per-service dependencies: merge them into the global file
+  - for req in /root/ForcAD/checkers/*/requirements.txt; do [ -s "$req" ] && { echo >> /root/ForcAD/checkers/requirements.txt; cat "$req" >> /root/ForcAD/checkers/requirements.txt; }; done
+  - sed -i '/^[[:space:]]*$/d' /root/ForcAD/checkers/requirements.txt
+  - awk '!seen[$0]++' /root/ForcAD/checkers/requirements.txt > /tmp/req.txt && mv /tmp/req.txt /root/ForcAD/checkers/requirements.txt
+  # Some checkers need a shared secret in their environment (e.g. vault master keys)
+  - echo "ENV CHECKER_SECRET={{ checker_secret }}" >> /root/ForcAD/docker_config/celery/Dockerfile.fast
+  - echo "ENV CHECKER_SECRET={{ checker_secret }}" >> /root/ForcAD/docker_config/celery/Dockerfile
+  # PyPI can be slow/flaky from inside the lab; make image builds retry
+  - printf 'ENV PIP_DEFAULT_TIMEOUT=60\nENV PIP_RETRIES=10\n' >> /root/ForcAD/docker_config/celery/Dockerfile.fast
+  - printf 'ENV PIP_DEFAULT_TIMEOUT=60\nENV PIP_RETRIES=10\n' >> /root/ForcAD/docker_config/celery/Dockerfile
   # Now run setup + start (config.yml and checkers are in place)
   - cd /root/ForcAD && python3 ./control.py setup
   - cd /root/ForcAD && python3 ./control.py start --fast

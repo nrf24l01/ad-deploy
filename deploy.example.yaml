@@ -12,6 +12,13 @@ template:
   vmid: 9000                             # VMID of the prepared template
   clone_full: false                      # true = full clone, false = linked clone
 
+ad:
+  repository: "https://github.com/C4T-BuT-S4D/ctfcup-2024-ad.git"
+  ref: master                             # Git branch or tag to deploy
+  start_time: ""                          # ForcAD local time; blank schedules 30 minutes after deployment starts
+  overlay: ""                             # Optional local tree merged over the clone (forcad config, per-service hooks)
+  task_ports: {}                          # Optional service -> checker port map when compose ports are ambiguous
+
 storage:
   iso: local                             # Storage where cloud-init ISOs are uploaded
   iso_dir: /var/lib/vz/template/iso
@@ -56,14 +63,7 @@ ip_plan:                                 # Point-to-point /31 links
 wireguard:
   port: 51820
   endpoint: ""                           # Public endpoint host:port (optional)
-  scp:                                   # Export generated configs to this machine
-    enabled: true
-    host: ""                             # Gateway SSH address (default: network.external.ip)
-    port: 22
-    user: root
-    output_dir: "wg-configs"             # Local directory to store the archives
-    wait_timeout_sec: 600                # Wait for gateway to finish cloud-init
-    poll_interval_sec: 15
+  output_dir: "wg-configs"               # Local directory for generated client configs
 
 frp:
   enabled: false

@@ -2,6 +2,7 @@
 cloud-init*
 creds*
 data*
+wg-configs/
 deploy.yaml
 *.pyc
 __pycache__

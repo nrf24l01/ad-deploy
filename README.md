@@ -8,7 +8,7 @@ Deploys a CTF lab on Proxmox by:
 - applying VM networking and hardware configuration
 - starting the full lab
 
-The script reads its configuration from a `deploy.yaml` file and expects supporting payload files under `data/`.
+The script reads its configuration from `deploy.yaml` and fetches the AD services, checkers, and ForcAD configuration from the configured Git repository.
 
 ## What It Creates
 
@@ -29,8 +29,9 @@ Network layout is based on isolated `/31` point-to-point links:
 You need:
 
 - `uv`
+- `git`
 - `genisoimage` or `mkisofs`
-- `sshpass` (only needed to automatically download the WireGuard configs from the gateway)
+- `wireguard-tools` (the `wg` binary, used to generate the WireGuard keys)
 - access to a Proxmox VE host
 - a prepared Proxmox VM template with cloud-init support
 - a Proxmox API token with permission to clone VMs, configure them, and upload ISOs
@@ -39,7 +40,7 @@ System packages example on Debian/Ubuntu:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y genisoimage sshpass
+sudo apt-get install -y git genisoimage wireguard-tools
 ```
 
 Install `uv` if it is not already present:
@@ -68,17 +69,6 @@ ad-deploy
 
 Either way, `uv` resolves the same dependencies (`requests`, `urllib3`, `proxmoxer`, `pyyaml`, `jinja2`).
 
-## Required Project Files
-
-Before running the deploy script, make sure these paths exist:
-
-- `deploy.yaml`
-- `data/config.yaml`
-- `data/checkers/`
-- `data/services/`
-
-The script zips `data/checkers/` and `data/services/` and injects them into the generated cloud-init payloads.
-
 ## Configuration
 
 Start from the example file:
@@ -88,6 +78,18 @@ cp deploy.example.yaml deploy.yaml
 ```
 
 Then edit `deploy.yaml` with your real Proxmox and network values.
+
+### AD source
+
+- `ad.repository`: Git URL containing the AD source (defaults to `https://github.com/C4T-BuT-S4D/ctfcup-2024-ad.git`)
+- `ad.ref`: branch or tag to fetch (defaults to `master`)
+- `ad.start_time`: optional ForcAD start time in the timezone set by the AD config; when blank, the deployer schedules it 30 minutes after deployment starts
+- `ad.overlay`: optional local directory copied over the clone, for repos that are not deployment-ready (supply `forcad_config.yml`, generated files, per-service `pre-start.sh` hooks)
+- `ad.task_ports`: optional `service: port` map, for services whose Compose file publishes several ports or one that cannot be inferred
+
+The repository (after the overlay is applied) must contain `services/`, `checkers/`, and `forcad_config.yml` at its root. The deployer packages the service and checker directories, replaces the ForcAD team list with `lab.n_teams` and the configured team IP plan, and sets a usable game start time. Git must be installed on the machine running the deployment.
+
+A service directory may contain an executable `pre-start.sh`; it runs before `docker compose up` on every team VM with `TEAM_IP` and `CHECKER_SECRET` in its environment, which covers per-team secrets and TLS material.
 
 ### Proxmox
 
@@ -138,13 +140,7 @@ Team VMIDs are generated as `team_base + team_number`.
 - `lab.allow_root_ssh`: `true` to allow root password SSH on team VMs
 - `lab.pool`: Proxmox pool to use or create
 - `wireguard.port`, `wireguard.endpoint`: WireGuard settings
-- `wireguard.scp`: export the generated WireGuard configs to this machine after the lab starts
-  - `enabled`: `true` to download them automatically
-  - `host`: gateway SSH address (defaults to `network.external.ip`)
-  - `port` / `user`: SSH target (default `22` / `root`)
-  - `output_dir`: local directory for the downloaded archives (default `wg-configs/`)
-  - `wait_timeout_sec`, `poll_interval_sec`: how long to wait for the gateway to finish
-  - requires `sshpass` on this machine; downloads `admin.zip` and `teamN.zip` from the gateway
+- `wireguard.output_dir`: local directory where the generated client configs are written (default `wg-configs/`)
 - `frp.enabled`, `frp.server`, `frp.port`, `frp.ver`: FRP settings for the gateway
 
 ## How To Use
@@ -158,18 +154,7 @@ cp deploy.example.yaml deploy.yaml
 
 Then edit `deploy.yaml` with your real Proxmox and network values.
 
-### 2. Add input data
-
-Create the required data structure:
-
-```text
-data/
-├── config.yaml
-├── checkers/
-└── services/
-```
-
-### 3. Run the deployment
+### 2. Run the deployment
 
 Run the script with `uv`:
 
@@ -184,14 +169,22 @@ When you run `uv run main.py`, the script will:
 1. load configuration from `deploy.yaml`
 2. create a Proxmox pool if needed
 3. build temporary cloud-init ISO files in a timestamped local directory
-4. zip and include `data/checkers/` and `data/services/`
-5. upload all generated ISOs to Proxmox storage
-6. write a credentials file like `creds_YYYYMMDD_HHMMSS.json`
-7. destroy any existing VMs using the configured VMIDs
-8. clone new VMs from the template
-9. configure CPU, memory, NICs, IP config, and attached cloud-init ISOs
-10. start all VMs
-11. download the WireGuard config archives (`admin.zip`, `teamN.zip`) from the gateway via scp (if enabled)
+4. clone the configured AD repository ref and validate its expected layout
+5. zip and include the repository's `checkers/` and `services/` folders, and adapt `forcad_config.yml` to the configured teams
+6. generate the WireGuard server config, client configs and archives on this machine
+7. build the cloud-init ISOs, packing the WireGuard bundle into the gateway ISO
+8. upload all generated ISOs to Proxmox storage
+9. write a credentials file like `creds_YYYYMMDD_HHMMSS.json`
+10. destroy any existing VMs using the configured VMIDs
+11. clone new VMs from the template
+12. configure CPU, memory, NICs, IP config, and attached cloud-init ISOs
+13. start all VMs
+
+The WireGuard configs are generated on this machine before any VM is created:
+the server `wg0.conf`, the admin and player client configs, and the
+`admin.zip` / `teamN.zip` archives. They are written to `wireguard.output_dir`
+and packed into the gateway's cloud-init ISO, so the gateway only installs them
+and never generates keys itself. Keys are regenerated on every deploy.
 
 ## Output Files
 
@@ -199,7 +192,7 @@ Each run generates:
 
 - a temporary local directory like `cloud-init_YYYYMMDD_HHMMSS/`
 - a credentials file like `creds_YYYYMMDD_HHMMSS.json`
-- a `wg-configs/` directory with the WireGuard client archives (if export is enabled)
+- a `wg-configs/` directory with `server/wg0.conf`, `admin/`, `teamN/`, plus the `admin.zip` and `teamN.zip` archives
 
 The credentials JSON contains generated passwords and addressing information for the deployed lab.
 

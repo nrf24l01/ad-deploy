@@ -21,9 +21,10 @@ from modules.config import (
     GW_CORES, GW_RAM_MB,
     FORCAD_CORES, FORCAD_RAM_MB,
     TEAM_CORES, TEAM_RAM_MB,
-    WG_PORT, WG_ENDPOINT,
+    WG_PORT, WG_ENDPOINT, WG_OUTPUT_DIR,
     FRP_ENABLED, FRP_SERVER, FRP_PORT, FRP_VER,
-    WG_SCP_ENABLED, WG_SCP_HOST, WG_SCP_OUTPUT_DIR,
+    AD_REPO_URL, AD_REPO_REF, AD_START_TIME,
+    AD_OVERLAY, AD_TASK_PORTS,
 )
 from modules.network import (
     team_vm_ip, team_gw_ip, team_vm_addr, team_gw_addr,
@@ -35,7 +36,8 @@ from modules.proxmox_api import (
     clone_vm, set_vm_config, start_vm,
     generate_mac_address, upload_iso,
 )
-from modules.wg_export import download_wg_configs
+from modules.ad_source import fetch_ad_source
+from modules.wireguard import generate_wireguard_configs
 from modules.cloud_init_generator import (
     gw_network_config, gw_user_data,
     forcad_user_data, forcad_network_config,
@@ -79,21 +81,38 @@ def main() -> None:
     print(f"[✓] Local cloud-init directory: {tmpdir}")
 
     # Prepare payloads
-    data_dir = os.path.abspath("./data")
+    ad_source_dir = fetch_ad_source(
+        AD_REPO_URL,
+        AD_REPO_REF,
+        os.path.join(tmpdir, "ad-source"),
+        overlay=AD_OVERLAY or None,
+    )
+    print(f"[✓] Fetched AD source: {AD_REPO_URL} ({AD_REPO_REF})")
+    if AD_OVERLAY:
+        print(f"    overlay applied: {AD_OVERLAY}")
+
     payload_dir = os.path.join(tmpdir, "payloads")
     os.makedirs(payload_dir, exist_ok=True)
     forcad_checkers_zip = os.path.join(payload_dir, "forcad-checkers.zip")
     services_zip = os.path.join(payload_dir, "services.zip")
-    zip_dir_to_file(os.path.join(data_dir, "checkers"), forcad_checkers_zip)
-    zip_dir_to_file(os.path.join(data_dir, "services"), services_zip)
-    with open(os.path.join(data_dir, "config.yaml"), "r", encoding="utf-8") as f:
+    zip_dir_to_file(str(ad_source_dir / "checkers"), forcad_checkers_zip)
+    zip_dir_to_file(str(ad_source_dir / "services"), services_zip)
+    with open(ad_source_dir / "forcad_config.yml", "r", encoding="utf-8") as f:
         base_config = f.read()
-    forcad_config = build_forcad_config(base_config, N_TEAMS)
+    forcad_config = build_forcad_config(
+        base_config,
+        N_TEAMS,
+        AD_START_TIME,
+        services_dir=ad_source_dir / "services",
+        task_ports=AD_TASK_PORTS,
+    )
+    print("[✓] ForcAD team list and game start time prepared")
 
     # Generate passwords
     print(f"\n[*] Generating cloud-init configs for {N_TEAMS} teams...")
     gw_password = random_password(20)
     forcad_password = random_password(20)
+    checker_secret = random_password(32)
     team_passwords: list[str] = [random_password(20) for _ in range(N_TEAMS)]
     teams_info: list[dict] = [
         {
@@ -104,6 +123,20 @@ def main() -> None:
         }
         for t in range(1, N_TEAMS + 1)
     ]
+
+    # WireGuard configs are generated here, on the deploy host, and shipped to
+    # the gateway on its cloud-init ISO.
+    wg_artifacts = generate_wireguard_configs(
+        n_teams=N_TEAMS,
+        wg_gw_ip=WG_GW_IP,
+        wg_port=WG_PORT,
+        wg_endpoint=WG_ENDPOINT,
+        teams=teams_info,
+        output_dir=WG_OUTPUT_DIR,
+        bundle_path=os.path.join(payload_dir, "wg-configs.zip"),
+    )
+    print(f"[✓] Generated {wg_artifacts['client_count']} WireGuard client configs "
+          f"in {wg_artifacts['root']}")
 
     creds: dict = {
         "generated_at_utc": ts,
@@ -126,6 +159,7 @@ def main() -> None:
             "root_password": forcad_password,
         },
         "teams": [],
+        "checker_secret": checker_secret,
     }
 
     # -- shared template variables for gateway --
@@ -155,6 +189,8 @@ def main() -> None:
             ext_gw_ip=EXT_GW_IP,
             ext_gw_gateway=EXT_GW_GATEWAY,
         ),
+        extra_files=[(str(wg_artifacts["bundle"]), "wg-configs.zip")],
+        iso_filename=f"ctf-gw-{ts}-cloud-init.iso",
     )
     print(f"[✓] Created gateway ISO: {os.path.basename(gw_iso)}")
 
@@ -164,11 +200,13 @@ def main() -> None:
             forcad_config,
             forcad_ip=FORCAD_IP,
             forcad_gw=FORCAD_GW,
+            checker_secret=checker_secret,
         ),
         "forcad",
         tmpdir,
         extra_files=[(forcad_checkers_zip, "forcad-checkers.zip")],
         network_config=forcad_network_config(FORCAD_IP, FORCAD_GW),
+        iso_filename=f"forcad-{ts}-cloud-init.iso",
     )
     print(f"[✓] Created ForcAD ISO: {os.path.basename(fc_iso)}")
 
@@ -178,11 +216,15 @@ def main() -> None:
         t_ip = team_vm_ip(team)
         t_gw = team_gw_addr(team)
         team_iso = create_cloud_init_iso(
-            team_user_data(pw, ALLOW_ROOT_SSH, t_ip, t_gw),
+            team_user_data(
+                pw, ALLOW_ROOT_SSH, t_ip, t_gw,
+                checker_secret=checker_secret,
+            ),
             f"team-{team}",
             tmpdir,
             extra_files=[(services_zip, "services.zip")],
             network_config=team_network_config(t_ip, t_gw),
+            iso_filename=f"team-{team}-{ts}-cloud-init.iso",
         )
         team_isos[team] = team_iso
         print(f"[✓] Created team {team} ISO: {os.path.basename(team_iso)} ({t_ip} -> gw {t_gw})")
@@ -302,16 +344,9 @@ def main() -> None:
     for team in range(1, N_TEAMS + 1):
         start_vm(VMID_TEAM_BASE + team)
 
-    # -------- Download WireGuard configs from the gateway --------
-    if WG_SCP_ENABLED and WG_SCP_HOST:
-        try:
-            download_wg_configs(WG_SCP_HOST, gw_password, N_TEAMS)
-        except Exception as e:
-            print(f"\n[!] WireGuard config download failed: {e}")
-            print(f"    Configs remain on the gateway under /srv/wg-configs/")
-    else:
-        print(f"\n[!] WireGuard config download skipped: no external host configured "
-              f"(set network.external.ip or wireguard.scp.host)")
+    # -------- WireGuard configs --------
+    print(f"\n[✓] WireGuard client configs are local: {wg_artifacts['root']}")
+    print(f"    admin.zip + teamN.zip are also on the gateway in /root/")
 
     print("\n" + "=" * 60)
     print("[+] Setup Complete!")
@@ -321,12 +356,7 @@ def main() -> None:
     print(f"    ForcAD:  {FORCAD_IP} (gw {FORCAD_GW})")
     for t in range(1, N_TEAMS + 1):
         print(f"    Team {t}:  {team_vm_ip(t)} (gw {team_gw_addr(t)})")
-    if WG_SCP_ENABLED and WG_SCP_HOST:
-        print(f"    WireGuard configs: {WG_SCP_OUTPUT_DIR}/")
-    else:
-        print(f"    WireGuard configs: NOT DOWNLOADED")
-        print(f"      Check on gateway: /var/log/wg-config-gen.log")
-        print(f"      Configs will be in: /srv/wg-configs/")
+    print(f"    WireGuard configs: {wg_artifacts['root']}/")
     print("    FRP client on GW forwards only UDP WireGuard port.")
 
 
