@@ -84,7 +84,7 @@ Then edit `deploy.yaml` with your real Proxmox and network values.
 - `ad.repository`: Git URL containing the AD source (defaults to `https://github.com/C4T-BuT-S4D/ctfcup-2024-ad.git`)
 - `ad.ref`: branch or tag to fetch (defaults to `master`)
 - `ad.start_time`: optional ForcAD start time in the timezone set by the AD config; when blank, the deployer schedules it 30 minutes after deployment starts
-- `ad.overlay`: optional local directory copied over the clone, for repos that are not deployment-ready (supply `forcad_config.yml`, generated files, per-service `pre-start.sh` hooks)
+- `ad.overlay`: optional local directory copied over the clone, for repos that are not deployment-ready (supply `forcad_config.yml`, generated files, per-service `pre-start.sh` hooks). Keep overlays outside this repository — they are deployment data, like `deploy.yaml`, and are gitignored under `ad-overlays/`.
 - `ad.task_ports`: optional `service: port` map, for services whose Compose file publishes several ports or one that cannot be inferred
 
 The repository (after the overlay is applied) must contain `services/`, `checkers/`, and `forcad_config.yml` at its root. The deployer packages the service and checker directories, replaces the ForcAD team list with `lab.n_teams` and the configured team IP plan, and sets a usable game start time. Git must be installed on the machine running the deployment.

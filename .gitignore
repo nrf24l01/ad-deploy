@@ -4,5 +4,7 @@ creds*
 data*
 wg-configs/
 deploy.yaml
+# Per-deployment overlays are deployment data, not tool source (see README).
+ad-overlays/
 *.pyc
 __pycache__
